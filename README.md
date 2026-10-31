@@ -7,7 +7,7 @@ Nintendo Switch via [nx.js](https://github.com/TooTallNate/nx.js).
 ## Install
 
 1. Download the official game ZIP from
-   [vgperson](https://vgperson.com/games/yourturntodie/) and place it,
+   [vgperson](https://vgperson.com/games/YourTurnToDie.zip) and place it,
    unextracted, at `sdmc:/switch/yourturntodie/YourTurnToDie.zip`.
 2. Copy the NRO from the
    [latest release](https://github.com/sukalibur9/yttd-nx/releases) to
