@@ -1,5 +1,10 @@
 # Your Turn To Die — Nintendo Switch (nx.js wrapper)
 
+
+<p align="center">
+  <img src="/YTTD.png" alt="Icon" width="220">
+</p>
+
 A loader that runs the RPG Maker MV web build of *Your Turn To Die* on
 Nintendo Switch via [nx.js](https://github.com/TooTallNate/nx.js).
 **No game files are included in this repository.**
