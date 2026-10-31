@@ -11,10 +11,10 @@ Nintendo Switch via [nx.js](https://github.com/TooTallNate/nx.js).
    unextracted, at `sdmc:/switch/yourturntodie/YourTurnToDie.zip`.
 2. Copy the NRO from the
    [latest release](https://github.com/sukalibur9/yttd-nx/releases) to
-   `sdmc:/switch/`.
-3. Launch from the Homebrew Menu in application mode (hold R when
+   `sdmc:/switch/yourturntodie/`.
+4. Launch from the Homebrew Menu in application mode (hold R when
    launching a title).
-4. Optional: create `sdmc:/switch/yourturntodie/config.txt` containing
+5. Optional: create `sdmc:/switch/yourturntodie/config.txt` containing
    `debug=1` to write `debug.log` next to it (default is off).
 
 ## Controls
