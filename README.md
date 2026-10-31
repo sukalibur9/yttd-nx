@@ -19,10 +19,10 @@ Nintendo Switch via [nx.js](https://github.com/TooTallNate/nx.js).
 
 ## Controls
 
-- Left stick: on-screen cursor (exclusive, it never moves menus)
+- Left stick: on-screen cursor
 - ZL / ZR: click at the cursor
-- A: confirm (also triggers touch pictures)
-- B: cancel, X: menu, Y: shift, D-pad: move, + / -: menu
+- A: confirm
+- B: cancel, D-pad: move
 - Touchscreen works as well.
 
 ## Build
