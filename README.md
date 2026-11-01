@@ -18,7 +18,7 @@ Nintendo Switch via [nx.js](https://github.com/TooTallNate/nx.js).
    [latest release](https://github.com/sukalibur9/yttd-nx/releases) to
    `sdmc:/switch/yourturntodie/`.
 4. Launch from the Homebrew Menu in application mode (hold R when
-   launching a title).
+   launching a title) or use Sphaira, find the nro, press X to open Options and choose Install Forwarder. Make sure Address Space is set to 39-bit, choose Create Forwarder, then start the game from the Home Screen.
 5. Optional: create `sdmc:/switch/yourturntodie/config.txt` containing
    `debug=1` to write `debug.log` next to it (default is off).
 
