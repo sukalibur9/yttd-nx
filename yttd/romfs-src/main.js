@@ -465,7 +465,7 @@ try {
 
 // Loader build number: bump on every NRO upload, printed at boot so any
 // debug.log identifies exactly which build produced it.
-const LOADER_BUILD = 50;
+const LOADER_BUILD = 52;
 // --- file debug log: sdmc:/switch/yourturntodie/debug.log --------------------
 // Only created when debug=1 in config.txt (see above).
 const DEBUG_LOG = 'sdmc:/switch/yourturntodie/debug.log';
@@ -796,6 +796,91 @@ function blitFrame() {
     try { globalThis.__yttdBlitMs = (globalThis.__yttdBlitMs | 0) + (Date.now() - t0); } catch (x) {}
   }
   drawCursor();
+  drawBackLogHint();
+}
+
+// Backlog screen (ponidog_BackLog plugin): L1 (pageup) OPENS the log, but
+// L1 does NOT close it — only A/B (ok/cancel), R (pagedown past page 0),
+// or a touchscreen tap closes it. Build 51 added a hint for that. Build 52
+// fixes the real performance bug the build-51 log proved: while the log is
+// open the game collapses to ~1 tick/s (STATUS ticks+=5 per 5s window,
+// recovering to ~240 the moment it closes), because the plugin redraws
+// the whole 816x624 log bitmap (clear + fill + ~40 text ops) EVERY frame
+// and one such redraw costs ~1s on Switch. The log text is static between
+// page turns, so redraw is now event-driven only: on the hidden->visible
+// transition, and on page turns. Page turns are detected in a
+// Window_Message.updateInput pre-check (which runs BEFORE the plugin's
+// own manual Input.update() consumes the trigger — that is why build 51's
+// render-time pageup logging never fired), forcing a redraw this frame
+// and the next, so either update ordering shows the new page. While
+// hidden, redraw is always skipped (build 51) and closing costs nothing.
+let _blPageTurnInstalled = false;
+function installBackLogPageTurn() {
+  try {
+    const WM = globalThis.Window_Message && Window_Message.prototype;
+    if (!WM || typeof WM.updateInput !== 'function' || WM._yttdBackLogWrap) return;
+    WM._yttdBackLogWrap = true;
+    const origUI = WM.updateInput;
+    WM.updateInput = function() {
+      try {
+        const sc = globalThis.SceneManager && SceneManager._scene;
+        const sp = sc && sc._spriteset && sc._spriteset._BackLog;
+        if (sp && sp.visible) {
+          const II = globalThis.Input;
+          const TI = globalThis.TouchInput;
+          let turn = false;
+          try { if (II && typeof II.isTriggered === 'function' && (II.isTriggered('pageup') || II.isTriggered('pagedown'))) turn = true; } catch (x) {}
+          try { if (!turn && TI && typeof TI.isTriggered === 'function' && TI.isTriggered()) turn = true; } catch (x) {}
+          if (turn) sp._yttdForceRedraw = 2;
+        }
+      } catch (x) {}
+      return origUI.call(this);
+    };
+    _blPageTurnInstalled = true;
+  } catch (x) {}
+}
+function drawBackLogHint() {
+  try {
+    installBackLogPageTurn();
+    const sc = globalThis.SceneManager && SceneManager._scene;
+    const ss = sc && sc._spriteset;
+    const sp = ss && ss._BackLog;
+    if (!sp || typeof sp.redraw !== 'function') return;
+    if (!sp._yttdRedrawWrapped) {
+      sp._yttdRedrawWrapped = true;
+      const origRedraw = sp.redraw.bind(sp);
+      sp.redraw = function() {
+        // Never draw while hidden: the bitmap is invisible, and the
+        // visible transition below redraws it when it reappears.
+        if (!this.visible) { this._yttdLastVis = false; return; }
+        const force = this._yttdForceRedraw | 0;
+        if (this._yttdLastVis !== true || force > 0) {
+          this._yttdLastVis = true;
+          if (force > 0) this._yttdForceRedraw = force - 1;
+          return origRedraw();
+        }
+        // Visible and unchanged: skip. One full redraw costs ~1s here.
+      };
+    }
+    if (sp._yttdPrevVis === undefined) {
+      sp._yttdPrevVis = sp.visible;
+    } else if (sp.visible !== sp._yttdPrevVis) {
+      try { log(sp.visible ? 'BackLog OPEN' : 'BackLog CLOSED'); } catch (x) {}
+      sp._yttdPrevVis = sp.visible;
+    }
+    if (!sp.visible) return;
+    try {
+      screenCtx.save();
+      screenCtx.font = '18px sans-serif';
+      screenCtx.fillStyle = '#fff';
+      screenCtx.textAlign = 'left';
+      screenCtx.textBaseline = 'middle';
+      const hx = BLIT_X + BLIT_W + 12;
+      screenCtx.fillText('A/B: close log', hx, 340);
+      screenCtx.fillText('L/R: pages', hx, 366);
+      screenCtx.restore();
+    } catch (x) {}
+  } catch (x) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -1495,7 +1580,12 @@ async function boot() {
               GT._yttdPCILogged = true;
               const origPCI = GT.setPictureCallInfo.bind(GT);
               GT.setPictureCallInfo = function(commonId, pictureId) {
-                try { log('PICTURE CLICK: common=' + commonId + ' picture=' + pictureId + ' TouchInput=(' + globalThis.TouchInput.x + ',' + globalThis.TouchInput.y + ')'); } catch (x) {}
+                // clearPictureCallInfo() calls this with (0,0) every
+                // frame; logging those drowned real picture calls (9160
+                // noise lines in one session). Log only real calls.
+                if (!(commonId === 0 && pictureId === 0)) {
+                  try { log('PICTURE CLICK: common=' + commonId + ' picture=' + pictureId + ' TouchInput=(' + globalThis.TouchInput.x + ',' + globalThis.TouchInput.y + ')'); } catch (x) {}
+                }
                 return origPCI(commonId, pictureId);
               };
             }
