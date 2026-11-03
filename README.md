@@ -27,7 +27,9 @@ Nintendo Switch via [nx.js](https://github.com/TooTallNate/nx.js).
 - Left stick: on-screen cursor
 - ZL / ZR: click at the cursor
 - A: confirm
-- B: cancel, D-pad: move
+- B: cancel
+- D-pad: move
+- L1: open conversation log
 - Touchscreen works as well.
 
 ## Build
