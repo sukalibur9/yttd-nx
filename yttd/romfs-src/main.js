@@ -178,6 +178,69 @@ function decryptRpgmvp(u8, keyHex) {
   for (let i = 0; i < 16 && i < out.length; i++) out[i] ^= keyBytes[i];
   return out;
 }
+// CRC-32 (IEEE) table for PNG chunk CRCs.
+const _crcTable = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c;
+  }
+  return t;
+})();
+function _crc32(bytes, start, len) {
+  let c = 0xFFFFFFFF;
+  for (let i = start; i < start + len; i++) c = _crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+// Paletted PNGs whose fully-transparent palette entries carry non-zero RGB
+// render visibly on Switch: the decoded straight-alpha pixels are treated
+// as premultiplied somewhere in the nx.js/Skia chain, so (RGB, alpha=0)
+// adds RGB to the backdrop instead of nothing (455 of 3091 pictures have
+// this pattern; Mishima's cara12 files use a green (71,112,76) for the
+// transparent index, which is why only he showed a light-teal panel,
+// while other characters' transparent entries are already (0,0,0) and
+// stay invisible). Zero the RGB of every fully-transparent palette entry
+// (PLTE CRC recomputed): fully-transparent pixels then stay invisible
+// under either interpretation, and no visible pixel changes, since only
+// alpha=0 entries are touched. Returns null when nothing needs changing.
+function fixPngPaletteTransparency(u8) {
+  try {
+    if (!u8 || u8.length < 33) return null;
+    if (u8[0] !== 0x89 || u8[1] !== 0x50 || u8[2] !== 0x4E || u8[3] !== 0x47) return null;
+    if (u8[25] !== 3) return null; // palette color type only
+    let off = 8, plteOff = -1, plteLen = 0, trns = null;
+    while (off + 8 <= u8.length) {
+      const len = (u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3];
+      const type = String.fromCharCode(u8[off + 4], u8[off + 5], u8[off + 6], u8[off + 7]);
+      if (type === 'PLTE') { plteOff = off + 8; plteLen = len; }
+      else if (type === 'tRNS') { trns = u8.slice(off + 8, off + 8 + len); }
+      else if (type === 'IDAT' || type === 'IEND') break;
+      off += 12 + len;
+    }
+    if (plteOff < 0 || !trns) return null;
+    let dirty = false;
+    for (let i = 0; i < trns.length; i++) {
+      if (trns[i] === 0) {
+        const p = plteOff + i * 3;
+        if (p + 2 < plteOff + plteLen && (u8[p] !== 0 || u8[p + 1] !== 0 || u8[p + 2] !== 0)) dirty = true;
+      }
+    }
+    if (!dirty) return null;
+    const out = u8.slice();
+    for (let i = 0; i < trns.length; i++) {
+      if (trns[i] === 0) {
+        const p = plteOff + i * 3;
+        if (p + 2 < plteOff + plteLen) { out[p] = 0; out[p + 1] = 0; out[p + 2] = 0; }
+      }
+    }
+    const crc = _crc32(out, plteOff - 4, 4 + plteLen);
+    const crcOff = plteOff + plteLen;
+    out[crcOff] = (crc >>> 24) & 0xFF; out[crcOff + 1] = (crc >>> 16) & 0xFF;
+    out[crcOff + 2] = (crc >>> 8) & 0xFF; out[crcOff + 3] = crc & 0xFF;
+    return out;
+  } catch (e) { return null; }
+}
 // percent-encoded paths (e.g. spaces in filenames, which fopen can't open
 // as %20) resolve correctly. Asset URLs are served from the ZIP when open.
 // Everything else goes to the real fetch.
@@ -232,6 +295,10 @@ globalThis.fetch = function (input, init) {
                 const key = await encryptionKey();
                 if (key) data = decryptRpgmvp(data, key);
               } catch (e) {}
+              try {
+                const fixed = fixPngPaletteTransparency(data);
+                if (fixed) data = fixed;
+              } catch (e) {}
             }
             if (isAudio && data.byteLength <= 2 * 1024 * 1024) _audioCache.set(rawPath, data);
             return new Response(data, { status: 200 });
@@ -240,8 +307,15 @@ globalThis.fetch = function (input, init) {
         }
         const data = Switch.readFileSync(rawPath);
         if (data) {
+          let outData = data;
+          if (/\.png$/i.test(rawPath)) {
+            try {
+              const fixed = fixPngPaletteTransparency(outData);
+              if (fixed) outData = fixed;
+            } catch (e) {}
+          }
           if (isAudio && data.byteLength <= 2 * 1024 * 1024) _audioCache.set(rawPath, data);
-          return new Response(data, { status: 200 });
+          return new Response(outData, { status: 200 });
         }
         // Missing audio must never fail the load (a missing SE froze the
         // game via the ResourceHandler stop path): serve 0.1s of silence.
@@ -391,7 +465,7 @@ try {
 
 // Loader build number: bump on every NRO upload, printed at boot so any
 // debug.log identifies exactly which build produced it.
-const LOADER_BUILD = 49;
+const LOADER_BUILD = 50;
 // --- file debug log: sdmc:/switch/yourturntodie/debug.log --------------------
 // Only created when debug=1 in config.txt (see above).
 const DEBUG_LOG = 'sdmc:/switch/yourturntodie/debug.log';
@@ -1190,6 +1264,26 @@ async function boot() {
             catch (e) { return 255; }
           };
           log('Fix: getAlphaPixel falls back to opaque on getImageData error');
+        }
+      } catch (x) {}
+      // Bitmap loads go through MV's Decrypter (XHR for .rpgmvp, decrypt in
+      // JS, blob URL to the Image) — NOT through the fetch wrapper's .png
+      // decrypt — so the palette-transparency fix must also run here, on
+      // the decrypted bytes before the blob URL is made. Non-PNG blobs
+      // pass through untouched (the fix returns null for them).
+      try {
+        const D = globalThis.Decrypter;
+        if (D && typeof D.createBlobUrl === 'function' && !D._yttdPngFix) {
+          D._yttdPngFix = true;
+          const origCBU = D.createBlobUrl.bind(D);
+          D.createBlobUrl = function(arrayBuffer) {
+            try {
+              const fixed = fixPngPaletteTransparency(new Uint8Array(arrayBuffer));
+              if (fixed) arrayBuffer = fixed.buffer;
+            } catch (x) {}
+            return origCBU(arrayBuffer);
+          };
+          log('Fix: paletted PNG transparent palette entries zeroed (Decrypter path)');
         }
       } catch (x) {}
       // Diagnostic: trace Graphics.printLoadingError to find the failing URL.
