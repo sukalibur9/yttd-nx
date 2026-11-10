@@ -465,7 +465,7 @@ try {
 
 // Loader build number: bump on every NRO upload, printed at boot so any
 // debug.log identifies exactly which build produced it.
-const LOADER_BUILD = 52;
+const LOADER_BUILD = 53;
 // --- file debug log: sdmc:/switch/yourturntodie/debug.log --------------------
 // Only created when debug=1 in config.txt (see above).
 const DEBUG_LOG = 'sdmc:/switch/yourturntodie/debug.log';
@@ -629,7 +629,27 @@ function nxAppendChild(el) {
 }
 
 function makeFakeCanvas(w, h) {
-  const c = new OffscreenCanvas(w || 816, h || 624);
+  const W = w || 816, H = h || 624;
+  try {
+    const c = new OffscreenCanvas(W, H);
+    return finishFakeCanvas(c);
+  } catch (e) {
+    // Native allocation failure (build 52 died this way: native heap at
+    // 3.1GB, OffscreenCanvas threw inside Window._refreshCursor, and V8
+    // then exited cleanly on fatal OOM). Force a GC and retry once so a
+    // transient exhaustion degrades instead of stopping the game.
+    try { if (typeof globalThis.gc === 'function') globalThis.gc(); } catch (x) {}
+    try {
+      const c = new OffscreenCanvas(W, H);
+      try { log('WARN: OffscreenCanvas alloc succeeded after forced gc'); } catch (x) {}
+      return finishFakeCanvas(c);
+    } catch (e2) {
+      try { log('WARN: OffscreenCanvas alloc failed, using 1x1 fallback'); } catch (x) {}
+      return finishFakeCanvas(new OffscreenCanvas(1, 1));
+    }
+  }
+}
+function finishFakeCanvas(c) {
   c.style = {};
   c.id = '';
   c.className = '';
@@ -756,7 +776,13 @@ class NxXMLHttpRequest {
       }
     } else {
       this.status = 404;
-      bootLog('sync XHR cache MISS: ' + this._url, true);
+      // EN.decompressed.json exists only in the legacy custom ZIP; with the
+      // official ZIP it is absent by design and CTE falls back to EN.cte
+      // (the CTE.loadLanguage wrapper already logs that fallback in plain
+      // text). Never print it red: it is not an error.
+      if (!/EN\.decompressed\.json$/.test(this._url || '')) {
+        bootLog('sync XHR cache MISS: ' + this._url, true);
+      }
     }
     this.readyState = 4;
     if (this.onreadystatechange) this.onreadystatechange();
@@ -1883,6 +1909,21 @@ async function boot() {
                 const mw = sm._scene._messageWindow;
                 const cw = mw._choiceWindow;
                 extra += ' msgwin:active-sub=' + (cw ? ('choice(active=' + cw.active + ',idx=' + (typeof cw.index === 'function' ? cw.index() : cw.index) + ')') : 'none');
+              }
+            } catch (x) {}
+            // Periodic forced GC: native canvas surfaces are freed only
+            // when V8 GC runs, but the JS heap stays small (~80MB) so V8
+            // rarely GCs on its own — dead canvases piled to 3.1GB and
+            // killed the app at ~18min (build 52, V8 fatal OOM, clean
+            // exit with no crash screen). Force a full GC every 30s.
+            try {
+              const nowGc = Date.now();
+              if (nowGc - (globalThis.__yttdLastGc || 0) >= 30000) {
+                globalThis.__yttdLastGc = nowGc;
+                if (typeof globalThis.gc === 'function') {
+                  globalThis.gc();
+                  try { log('gc() forced (periodic 30s)'); } catch (e) {}
+                }
               }
             } catch (x) {}
             log('STATUS scene=' + scene + ' ticks+=' + dTk + ' frames+=' + dFc + ' renderAvgMs=' + avgR + ' tonePf=' + tonePf + ' sprPf=' + sprPf + ' blitPf=' + blitPf + ' tilePf=' + tilePf + ' winPf=' + winPf + ' updPf=' + updPf + ' drawPf=' + drawPf + ' tileUpdPf=' + tileUpdPf + ' winLayerPf=' + winLayerPf + ' tilingPf=' + tilingPf + nodeInfo + ' skip=' + (G ? G._skipCount : '?') + extra);
