@@ -465,7 +465,7 @@ try {
 
 // Loader build number: bump on every NRO upload, printed at boot so any
 // debug.log identifies exactly which build produced it.
-const LOADER_BUILD = 53;
+const LOADER_BUILD = 56;
 // --- file debug log: sdmc:/switch/yourturntodie/debug.log --------------------
 // Only created when debug=1 in config.txt (see above).
 const DEBUG_LOG = 'sdmc:/switch/yourturntodie/debug.log';
@@ -1228,10 +1228,140 @@ async function boot() {
     bootLog('beforeunload prevented: "+" no longer exits the app');
   } catch (x) {}
 
+  // --- SD-card saves: redirect StorageManager webStorage to files -------
+  // MV on nx.js uses the webStorage path (localStorage), which nx.js backs
+  // with the per-user SYSTEM save data (the 64.1 MB "?" entry) — and
+  // mounting that save data is what shows the profile picker at boot.
+  // Redirecting saves to plain SD files removes both the system-save
+  // footprint and the picker trigger. The file content is identical to
+  // the web path: the same LZString-compressed Base64 string localStorage
+  // would hold, so migration is a verbatim copy and the format is
+  // unchanged. Installed after plugins load, before Scene_Boot reads
+  // any save (config/global/title save list).
+  const SD_SAVE_DIR = 'sdmc:/switch/yourturntodie/saves/';
+  function sdSavePath(savefileId, bak) {
+    var name;
+    if (savefileId < 0) name = 'config.rpgsave';
+    else if (savefileId === 0) name = 'global.rpgsave';
+    else name = 'file' + savefileId + '.rpgsave';
+    return SD_SAVE_DIR + name + (bak ? '.bak' : '');
+  }
+  function sdSaveExists(path) {
+    try { var st = Switch.statSync(path); return !!(st && Number(st.size) >= 0); } catch (e) { return false; }
+  }
+  function sdSaveRead(path) {
+    try {
+      var d = Switch.readFileSync(path);
+      if (d == null) return null;
+      return (typeof d === 'string') ? d : new TextDecoder().decode(d);
+    } catch (e) { return null; }
+  }
+  function sdSaveWrite(path, data) {
+    try { Switch.mkdirSync(SD_SAVE_DIR); } catch (e) {}
+    Switch.writeFileSync(path, data);
+  }
+  function sdSaveRemove(path) {
+    try { Switch.removeSync(path); } catch (e) {}
+  }
+  function installSdSaves() {
+    var SM = globalThis.StorageManager;
+    var LZ = globalThis.LZString;
+    if (!SM || !LZ) { bootLog('SD saves: StorageManager/LZString missing, redirect NOT installed', true); return; }
+    if (typeof Switch === 'undefined') { bootLog('SD saves: Switch fs missing, redirect NOT installed', true); return; }
+    try { Switch.mkdirSync(SD_SAVE_DIR); } catch (e) {}
+    // One-time migration: copy any system-save (localStorage) entry to an
+    // SD file that does not exist yet. Verbatim copy of the compressed
+    // string; the system save is left untouched as a fallback.
+    // Runs ONLY when no SD save file exists yet: re-reading localStorage
+    // on every boot would re-mount the system save (and re-show the
+    // profile picker) — exactly what the SD redirect is meant to stop.
+    // Build 56: the NACP sets userAccountSaveDataSize=0, so the runtime
+    // returns undefined for localStorage and the picker can NEVER appear,
+    // even with no SD saves at all; the migration below then never runs.
+    var sdHasSaves = sdSaveExists(sdSavePath(-1, false)) || sdSaveExists(sdSavePath(0, false)) || sdSaveExists(sdSavePath(1, false));
+    if (sdHasSaves) {
+      try { log('SD saves: SD files already exist, migration skipped (localStorage untouched)'); } catch (e) {}
+    } else if (typeof globalThis.localStorage === 'undefined' || !globalThis.localStorage) {
+      try { log('SD saves: localStorage disabled (NACP userAccountSaveDataSize=0), migration skipped, profile picker cannot appear'); } catch (e) {}
+      bootLog('SD saves: localStorage off (no profile picker)');
+    } else {
+    try {
+      var migrated = 0, alreadySd = 0;
+      var ids = [-1, 0];
+      for (var i = 1; i <= 50; i++) ids.push(i);
+      ids.forEach(function(id) {
+        var key = SM.webStorageKey(id);
+        [false, true].forEach(function(bak) {
+          var k = bak ? key + 'bak' : key;
+          var p = sdSavePath(id, bak);
+          if (sdSaveExists(p)) { alreadySd++; return; }
+          var val = null;
+          try { val = globalThis.localStorage.getItem(k); } catch (e) {}
+          if (val != null) {
+            try { sdSaveWrite(p, val); migrated++; try { log('SD saves: migrated ' + k + ' -> ' + p + ' (' + val.length + ' chars)'); } catch (e) {} } catch (e) { try { log('SD saves: MIGRATION FAILED for ' + k + ': ' + (e && e.message)); } catch (e2) {} }
+          }
+        });
+      });
+      try { log('SD saves: migration done, migrated=' + migrated + ' already-on-sd=' + alreadySd); } catch (e) {}
+    } catch (e) { try { log('SD saves: migration error: ' + (e && e.message)); } catch (e2) {} }
+    }
+    // Redirect the whole webStorage surface (incl. the backup/clean/
+    // restore helpers, whose web branches touch localStorage directly).
+    SM.saveToWebStorage = function(savefileId, json) {
+      var data = LZ.compressToBase64(json);
+      try { sdSaveWrite(sdSavePath(savefileId, false), data); try { log('SD saves: wrote ' + sdSavePath(savefileId, false) + ' (' + data.length + ' chars)'); } catch (e) {} }
+      catch (e) { try { log('SD saves: WRITE FAILED ' + sdSavePath(savefileId, false) + ': ' + (e && e.message)); } catch (e2) {} throw e; }
+    };
+    SM.loadFromWebStorage = function(savefileId) {
+      return LZ.decompressFromBase64(sdSaveRead(sdSavePath(savefileId, false)));
+    };
+    SM.loadFromWebStorageBackup = function(savefileId) {
+      return LZ.decompressFromBase64(sdSaveRead(sdSavePath(savefileId, true)));
+    };
+    SM.webStorageExists = function(savefileId) {
+      return sdSaveExists(sdSavePath(savefileId, false));
+    };
+    SM.webStorageBackupExists = function(savefileId) {
+      return sdSaveExists(sdSavePath(savefileId, true));
+    };
+    SM.removeWebStorage = function(savefileId) {
+      sdSaveRemove(sdSavePath(savefileId, false));
+    };
+    SM.backup = function(savefileId) {
+      if (this.exists(savefileId)) {
+        var data = sdSaveRead(sdSavePath(savefileId, false));
+        if (data != null) { try { sdSaveWrite(sdSavePath(savefileId, true), data); } catch (e) {} }
+      }
+    };
+    SM.cleanBackup = function(savefileId) {
+      if (this.backupExists(savefileId)) sdSaveRemove(sdSavePath(savefileId, true));
+    };
+    SM.restoreBackup = function(savefileId) {
+      if (this.backupExists(savefileId)) {
+        var data = sdSaveRead(sdSavePath(savefileId, true));
+        if (data != null) { try { sdSaveWrite(sdSavePath(savefileId, false), data); } catch (e) {} }
+      }
+    };
+    // The screenshot plugin (MakeScreenCapture) writes in-game captures
+    // to localStorage in web mode; with localStorage disabled that call
+    // would throw. In-game capture is unreachable on Switch anyway
+    // (keyboard / MSC_MAKE plugin command never used), so swallow it
+    // with a log instead of letting it break the game.
+    if (SM.saveImgToWebStorage) {
+      SM.saveImgToWebStorage = function(fileName, data) {
+        try { log('SD saves: in-game screenshot capture skipped (localStorage disabled)'); } catch (e) {}
+      };
+    }
+    bootLog('SD saves: StorageManager redirected to ' + SD_SAVE_DIR);
+  }
+
   // Wait for plugin <script async=false> queue, then start the game.
   // (main.js called PluginManager.setup($plugins) during its eval.)
   await nxDrainScripts();
   bootLog('plugins loaded, starting game...');
+  // Redirect saves to SD files (with one-time migration from the system
+  // save) before Scene_Boot reads any save.
+  try { installSdSaves(); } catch (e) { try { log('SD saves: install failed: ' + (e && e.message)); } catch (e2) {} }
   // Diagnostic: trace scene transitions to pinpoint OOM phase.
   try {
     const sm = globalThis.SceneManager;
