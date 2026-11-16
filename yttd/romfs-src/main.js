@@ -465,7 +465,7 @@ try {
 
 // Loader build number: bump on every NRO upload, printed at boot so any
 // debug.log identifies exactly which build produced it.
-const LOADER_BUILD = 56;
+const LOADER_BUILD = 60;
 // --- file debug log: sdmc:/switch/yourturntodie/debug.log --------------------
 // Only created when debug=1 in config.txt (see above).
 const DEBUG_LOG = 'sdmc:/switch/yourturntodie/debug.log';
@@ -942,6 +942,13 @@ function cursorPoll() {
       cursor.clickBtn = pressed(6) ? 6 : 7;
       cursorClick(click ? 'touchstart' : 'touchend');
     }
+    // Build 59: while held, report cursor movement as touchmove so the
+    // held touch TRACKS the cursor (Memory Dance follow-the-area needs
+    // this — without it the touch position freezes at the touchstart
+    // point and the game thinks the cursor left the bounds).
+    if (cursor.clickDown && (cursor.x !== cursor.lastSentX || cursor.y !== cursor.lastSentY)) {
+      cursorClick('touchmove');
+    }
   } catch (e) { /* non-fatal */ }
 }
 function cursorClick(type) {
@@ -953,6 +960,10 @@ function cursorClick(type) {
     const pageY = BLIT_Y + cursor.y * BLIT_S;
     const touch = { pageX, pageY, clientX: pageX, clientY: pageY, identifier: 0 };
     const evt = { touches: type === 'touchend' ? [] : [touch], changedTouches: [touch], preventDefault() {} };
+    if (type === 'touchstart' || type === 'touchmove') {
+      cursor.lastSentX = cursor.x;
+      cursor.lastSentY = cursor.y;
+    }
     for (const fn of handlers.slice()) {
       try { fn(evt); } catch (ex) { logErr('cursor touch handler threw:', ex); }
     }
@@ -1812,8 +1823,10 @@ async function boot() {
           if (SM && typeof SM.updateMain === 'function' && !SM._yttdTickCounted) {
             SM._yttdTickCounted = true;
             globalThis.__yttdTicks = 0;
+            globalThis.__yttdMaxGap = 0;
+            globalThis.__yttdLastUM = 0;
             const origUM = SM.updateMain.bind(SM);
-            SM.updateMain = function() { try { globalThis.__yttdTicks++; } catch (x) {} return origUM(); };
+            SM.updateMain = function() { try { globalThis.__yttdTicks++; var nowUM = Date.now(); if (globalThis.__yttdLastUM) { var gapUM = nowUM - globalThis.__yttdLastUM; if (gapUM > globalThis.__yttdMaxGap) globalThis.__yttdMaxGap = gapUM; } globalThis.__yttdLastUM = nowUM; } catch (x) {} return origUM(); };
           }
         } catch (x) {}
         try {
@@ -1862,6 +1875,63 @@ async function boot() {
               const r = origS.call(this, renderer);
               globalThis.__yttdSprMs += (Date.now() - t0);
               return r;
+            };
+          }
+          // Build 57 fix (Map089 dance/corridor lag): MV's
+          // Sprite._refresh re-runs _createTinter every time a picture's
+          // tone changes, and _createTinter sets canvas.width/height
+          // unconditionally — which RESETS the tint canvas backing store
+          // (native realloc + GPU pipeline flush) even when the size is
+          // unchanged. A picture's frame size never changes during a
+          // tint animation, so every one of those resets is wasted; with
+          // 5 pictures tinting at once it stalls the main loop to ~3s
+          // per iteration (CPU counters stay ~0ms — the cost is all
+          // GPU/present-side). Reimplement _createTinter to set the size
+          // only when it actually differs; zero visual change. Counts
+          // tint regenerations + skipped reallocs for the STATUS line.
+          globalThis.__yttdTintRef = 0;
+          globalThis.__yttdTintSkip = 0;
+          if (SP && SP.prototype && SP.prototype._createTinter && !SP.prototype._yttdTinterFixed) {
+            SP.prototype._yttdTinterFixed = true;
+            SP.prototype._createTinter = function(w, h) {
+              try { globalThis.__yttdTintRef++; } catch (x) {}
+              if (!this._canvas) {
+                this._canvas = document.createElement('canvas');
+                this._context = this._canvas.getContext('2d');
+              }
+              var sizeSame = (this._canvas.width === w && this._canvas.height === h);
+              if (this._canvas.width !== w) this._canvas.width = w;
+              if (this._canvas.height !== h) this._canvas.height = h;
+              if (sizeSame) { try { globalThis.__yttdTintSkip++; } catch (x) {} }
+              if (!this._tintTexture) {
+                this._tintTexture = new PIXI.BaseTexture(this._canvas);
+              }
+              this._tintTexture.width = w;
+              this._tintTexture.height = h;
+              this._tintTexture.scaleMode = this._bitmap.baseTexture.scaleMode;
+            };
+          }
+          // Build 59 REAL tint fix (build 58 proved the tint path was
+          // the cause: lag gone with tinting off). During a 60-frame
+          // Tint Picture the tone changes every frame, forcing a full
+          // _executeTint (6 fullscreen passes, ~50ms GPU) per frame per
+          // picture. Quantize the tone to steps of 32 before setColorTone
+          // compares it: a 0->-255 fade then regenerates ~8 times instead
+          // of 60 (~8x fewer passes). The fade steps in 32/255 increments
+          // (a step every ~7 frames) — slightly steppy, but the final tone
+          // is exact and the animation completes instead of freezing.
+          if (SP && SP.prototype && SP.prototype.setColorTone && !SP.prototype._yttdToneQuant) {
+            SP.prototype._yttdToneQuant = true;
+            const origSCT = SP.prototype.setColorTone;
+            SP.prototype.setColorTone = function(tone) {
+              if (!tone || tone.length < 4) return origSCT.call(this, tone);
+              const q = [
+                Math.max(-255, Math.min(255, Math.round(tone[0] / 32) * 32)),
+                Math.max(-255, Math.min(255, Math.round(tone[1] / 32) * 32)),
+                Math.max(-255, Math.min(255, Math.round(tone[2] / 32) * 32)),
+                Math.max(0, Math.min(255, Math.round(tone[3] / 32) * 32))
+              ];
+              return origSCT.call(this, q);
             };
           }
           const TM = globalThis.Tilemap;
@@ -1983,6 +2053,12 @@ async function boot() {
             globalThis.__yttdTileUpdMs = 0;
             globalThis.__yttdWinLayerMs = 0;
             globalThis.__yttdTilingMs = 0;
+            const tintRef = globalThis.__yttdTintRef | 0;
+            const tintSkip = globalThis.__yttdTintSkip | 0;
+            globalThis.__yttdTintRef = 0;
+            globalThis.__yttdTintSkip = 0;
+            const maxGap = globalThis.__yttdMaxGap | 0;
+            globalThis.__yttdMaxGap = 0;
             const tonePf = dFc ? (toneMs / dFc).toFixed(1) : '?';
             const sprPf = dFc ? (sprMs / dFc).toFixed(1) : '?';
             const blitPf = dFc ? (blitMs / dFc).toFixed(1) : '?';
@@ -1997,7 +2073,7 @@ async function boot() {
             // container recursion even with cheap leaf draws).
             let nodeInfo = '';
             try {
-              const st = sm && sm._scene;
+              const st = globalThis.SceneManager && globalThis.SceneManager._scene;
               if (st) {
                 let n = 0;
                 const counts = Object.create(null);
@@ -2045,18 +2121,30 @@ async function boot() {
             // when V8 GC runs, but the JS heap stays small (~80MB) so V8
             // rarely GCs on its own — dead canvases piled to 3.1GB and
             // killed the app at ~18min (build 52, V8 fatal OOM, clean
-            // exit with no crash screen). Force a full GC every 30s.
+            // exit with no crash screen). Force a full GC every 300s
+            // (5 min; was 30s — changed per user request 2026-11-16 to
+            // reduce GC hitches; the makeFakeCanvas gc-retry remains as
+            // the safety net if an allocation fails between forced GCs).
             try {
               const nowGc = Date.now();
-              if (nowGc - (globalThis.__yttdLastGc || 0) >= 30000) {
+              if (nowGc - (globalThis.__yttdLastGc || 0) >= 300000) {
                 globalThis.__yttdLastGc = nowGc;
                 if (typeof globalThis.gc === 'function') {
                   globalThis.gc();
-                  try { log('gc() forced (periodic 30s)'); } catch (e) {}
+                  try { log('gc() forced (periodic 300s)'); } catch (e) {}
                 }
               }
             } catch (x) {}
-            log('STATUS scene=' + scene + ' ticks+=' + dTk + ' frames+=' + dFc + ' renderAvgMs=' + avgR + ' tonePf=' + tonePf + ' sprPf=' + sprPf + ' blitPf=' + blitPf + ' tilePf=' + tilePf + ' winPf=' + winPf + ' updPf=' + updPf + ' drawPf=' + drawPf + ' tileUpdPf=' + tileUpdPf + ' winLayerPf=' + winLayerPf + ' tilingPf=' + tilingPf + nodeInfo + ' skip=' + (G ? G._skipCount : '?') + extra);
+            let heapInfo = '';
+            try {
+              if (typeof Switch !== 'undefined' && Switch.memoryUsage) {
+                const mu = Switch.memoryUsage();
+                const uh = mu.usedHeapSize ? Math.round(mu.usedHeapSize / 1048576) : -1;
+                const th = mu.totalHeapSize ? Math.round(mu.totalHeapSize / 1048576) : -1;
+                heapInfo = ' heap=' + uh + '/' + th + 'MB';
+              }
+            } catch (x) {}
+            log('STATUS scene=' + scene + ' ticks+=' + dTk + ' frames+=' + dFc + ' renderAvgMs=' + avgR + ' tonePf=' + tonePf + ' sprPf=' + sprPf + ' blitPf=' + blitPf + ' tilePf=' + tilePf + ' winPf=' + winPf + ' updPf=' + updPf + ' drawPf=' + drawPf + ' tileUpdPf=' + tileUpdPf + ' winLayerPf=' + winLayerPf + ' tilingPf=' + tilingPf + ' tintRef=' + tintRef + '/' + tintSkip + ' maxGapMs=' + maxGap + heapInfo + nodeInfo + ' skip=' + (G ? G._skipCount : '?') + extra);
           } catch (x) {}
         }, 5000);
       } catch (x) {}
