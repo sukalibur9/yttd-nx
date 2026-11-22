@@ -398,7 +398,14 @@ try {
 
 // Input diagnostics: log gamepad button presses / stick moves (edge-triggered)
 // so hardware tests prove whether pad input reaches JS at all.
-try {
+// DISABLED in build 61 (PAD_DIAG_ENABLED=false): input is proven working,
+// and the poller adds ~85 native hid reads/sec. The 2026-11-18 HID crash
+// (svcBreak 0x1159, NULL hid singleton) is a runtime race the loader can
+// only mitigate by reducing the native gamepad read rate; build 66 runs
+// unthrottled (build 60 base) and accepts that risk for full input
+// responsiveness.
+const PAD_DIAG_ENABLED = false;
+if (PAD_DIAG_ENABLED) try {
   let prevButtons = [];
   let prevAxes = [];
   setInterval(() => {
@@ -465,7 +472,7 @@ try {
 
 // Loader build number: bump on every NRO upload, printed at boot so any
 // debug.log identifies exactly which build produced it.
-const LOADER_BUILD = 60;
+const LOADER_BUILD = 66;
 // --- file debug log: sdmc:/switch/yourturntodie/debug.log --------------------
 // Only created when debug=1 in config.txt (see above).
 const DEBUG_LOG = 'sdmc:/switch/yourturntodie/debug.log';
@@ -919,6 +926,11 @@ function drawBackLogHint() {
 // Game coords 816x624; page coords invert MV's pageToCanvas math exactly.
 // ---------------------------------------------------------------------------
 const cursor = { x: 408, y: 312, clickDown: false };
+// Build 66: back to the build 60 input base — no throttling. The cursor
+// and the game's _updateGamepadState both run every tick (60Hz), as in
+// builds 60 and earlier. (Builds 61–65 throttled input to delay the HID
+// crash; the user chose full responsiveness instead. The getAlphaPixel
+// bounds-check fix from build 65 is kept.)
 function cursorPoll() {
   try {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -926,7 +938,7 @@ function cursorPoll() {
     if (!gp) return;
     const axes = gp.axes || [];
     const ax = axes[0] || 0, ay = axes[1] || 0;
-    const DZ = 0.15, SPEED = 14; // game px per tick at full tilt
+    const DZ = 0.15, SPEED = 14; // game px per poll at full tilt (60Hz)
     const mx = Math.abs(ax) > DZ ? ax : 0;
     const my = Math.abs(ay) > DZ ? ay : 0;
     cursor.x = Math.max(0, Math.min(GW - 1, cursor.x + mx * SPEED));
@@ -1003,6 +1015,9 @@ function installStickMask() {
     if (II && typeof II._updateGamepadState === 'function' && !II._yttdStickMasked) {
       II._yttdStickMasked = true;
       II._updateGamepadState = function(gamepad) {
+        // Build 66: no throttle (build 60 base) — runs every frame (60Hz).
+        // (Builds 61–65 throttled this to 30Hz/15Hz to delay the HID crash;
+        // the user chose full responsiveness instead.)
         var lastState = this._gamepadStates[gamepad.index] || [];
         var newState = [];
         var buttons = gamepad.buttons;
@@ -1506,13 +1521,27 @@ async function boot() {
       // the game (frozen frame) and left the error stack drawn on screen
       // as red text. Fall back to opaque (255): a deliberate click should
       // trigger the picture rather than crash the game.
+      // Build 65: a NATIVE crash (Data Abort, NULL deref inside the
+      // pixel-conversion loop) cannot be caught by try/catch — build 64
+      // crashed this way after repeated clicks at one spot. So validate
+      // BEFORE calling the native function: skip the call entirely (and
+      // return opaque) when the bitmap has no canvas, has zero/invalid
+      // dimensions, or the coordinates are out of bounds. MV's
+      // getAlphaPixel does getImageData(x, y, 1, 1); an out-of-bounds
+      // (x, y) is the prime suspect for the native crash.
       try {
         const BP = globalThis.Bitmap && Bitmap.prototype;
         if (BP && typeof BP.getAlphaPixel === 'function' && !BP._yttdAlphaFallback) {
           BP._yttdAlphaFallback = true;
           const origGAP = BP.getAlphaPixel;
           BP.getAlphaPixel = function(x, y) {
-            try { return origGAP.call(this, x, y); }
+            try {
+              if (!this || !this._canvas) return 255;
+              const w = this.width, h = this.height;
+              if (typeof w !== 'number' || typeof h !== 'number' || w <= 0 || h <= 0) return 255;
+              if (typeof x !== 'number' || typeof y !== 'number' || x < 0 || y < 0 || x >= w || y >= h) return 255;
+              return origGAP.call(this, x, y);
+            }
             catch (e) { return 255; }
           };
           log('Fix: getAlphaPixel falls back to opaque on getImageData error');
